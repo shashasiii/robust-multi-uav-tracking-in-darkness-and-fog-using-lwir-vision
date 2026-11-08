@@ -1,0 +1,37 @@
+# BoT-SORT settings for UAV thermal tracking stability experiments.
+#
+# Goals:
+# - keep lost drone tracks alive longer when a drone briefly leaves the frame
+# - reduce new IDs caused by weak environmental false positives
+# - keep ReID disabled for thermal imagery until it is explicitly evaluated
+
+tracker_type: botsort
+
+# First-stage match threshold. Raising this filters weak detections from the
+# main association stage and helps suppress false tracks.
+track_high_thresh: 0.35
+
+# Low-score detections can still help recovery, but keep this conservative to
+# avoid attaching background noise to existing tracks.
+track_low_thresh: 0.10
+
+# Require stronger unmatched detections before opening a new track.
+new_track_thresh: 0.45
+
+# Keep lost tracks for longer. At 25 FPS, 120 frames is about 4.8 seconds.
+track_buffer: 120
+
+# Slightly relax association compared with the default 0.8 so returning drones
+# can reconnect more easily after partial loss.
+match_thresh: 0.75
+
+fuse_score: True
+
+# Keep global motion compensation enabled for moving-camera sequences.
+gmc_method: sparseOptFlow
+
+# Thermal appearance features are not reliable enough for the first round.
+proximity_thresh: 0.5
+appearance_thresh: 0.8
+with_reid: False
+model: auto

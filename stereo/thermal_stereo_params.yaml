@@ -1,0 +1,74 @@
+calibration:
+  source: "doc/README-javier-11Jul2025.md"
+  pair_name: "left_thermal <-> right_thermal"
+  frame_resolution: [640, 512]
+  frame_resolution_basis: >
+    当前原始左右热成像数据的实际采集与处理尺寸。源 README 未明确记录
+    历史资料未保存 MATLAB 热相机标定结果中的 ImageSize，不能源文件级证明标定分辨率一致；
+    当前按 640x512 处理，并将潜在内参尺度与测距系统误差作为固定限制披露，不再补做标定实验。
+  convention:
+    units: "pixels for K, cm for listed T, convert to m when computing depth"
+    note: >
+      外参包含左热到右热的旋转和平移（R,T）。R 与 T 对应从左热相机坐标系到右热坐标系
+      的刚体变换。三角测量建议先做立体校正得到统一像平面，再按标准公式计算。
+      热成像原始输入为 640x512；RealSense RGB/Depth 的 640x480 是另一套成像尺寸，
+      不得据此裁剪或缩放热成像输入。
+
+  intrinsic:
+    left_thermal:
+      width: 640
+      height: 512
+      fx: 344.08059125
+      fy: 343.71871889
+      cx: 320.20695996
+      cy: 271.73937497
+      dist:
+        k1: -0.21823207
+        k2: 0.04657087
+        p1: 0.0
+        p2: 0.0
+        k3: 0.0
+    right_thermal:
+      width: 640
+      height: 512
+      fx: 342.69763215
+      fy: 342.45604858
+      cx: 323.56293972
+      cy: 267.49213891
+      dist:
+        k1: -0.22042839
+        k2: 0.04895111
+        p1: 0.0
+        p2: 0.0
+        k3: 0.0
+
+  extrinsic_left_to_right:
+    R:
+      - [0.9998928479139975,  0.006664201062753905,  0.013033844967273217]
+      - [-0.0065988424903717065, 0.999965470127153, -0.005051121773369857]
+      - [-0.01306705660135398,  0.004964572245152228,  0.9999022977542356]
+    T_cm:
+      - -12.16520307054718
+      - 0.037876701143810795
+      - -0.15966275775746094
+    T_m:
+      - -0.1216520307054718
+      - 0.00037876701143810795
+      - -0.0015966275775746094
+
+  baseline_estimate:
+    bx: -0.1216520307054718
+    by: 0.00037876701143810795
+    bz: -0.0015966275775746094
+    B_m: 0.121653
+    B_comment: "使用 fx≈344（左相机）计算，若做精确可用 |T_left_to_right_m|"
+
+triangulation_notes:
+  use_rectification_first: true
+  depth_formula_without_full_projection: "Z = f * B / disparity"
+  with_Q_projection: "Use cv2.reprojectImageTo3D(disparity, Q) for dense 3D"
+  required_disparity:
+    condition: "disparity > 0"
+    note: "disparity<=0 则对应点无效或远场/匹配失败"
+  output_unit: "meters"
+

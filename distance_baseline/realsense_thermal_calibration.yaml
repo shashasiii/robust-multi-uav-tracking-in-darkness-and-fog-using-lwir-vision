@@ -1,0 +1,32 @@
+calibration:
+  source: doc/README-javier-11Jul2025.md
+  transform_convention: "row-vector: X_rgb = X_left_thermal @ R + T_m"
+  depth_sampling_assumption: >
+    The saved depth_raw image is sampled in the corresponding 640x480 RGB image
+    pixel grid. This is a dataset assumption and must be rechecked if the capture
+    pipeline or RealSense alignment settings change.
+
+left_thermal:
+  width: 640
+  height: 512
+  K:
+    - [344.08059125, 0.0, 320.20695996]
+    - [0.0, 343.71871889, 271.73937497]
+    - [0.0, 0.0, 1.0]
+  dist: [-0.21823207, 0.04657087, 0.0, 0.0, 0.0]
+
+rgb:
+  width: 640
+  height: 480
+  K:
+    - [387.22243591, 0.0, 323.99310727]
+    - [0.0, 387.07049416, 244.82031200]
+    - [0.0, 0.0, 1.0]
+  dist: [-0.05085226, 0.04278795, 0.0, 0.0, 0.0]
+
+left_thermal_to_rgb:
+  R:
+    - [0.999979691664164, 0.006359021898875782, -0.0004232017641123605]
+    - [-0.006357600546184011, 0.9999744135762715, 0.0032791932067709082]
+    - [0.00044404339730520217, -0.003276436064047327, 0.9999945338811506]
+  T_m: [-0.07309151021484832, 0.06182557268473313, 0.02263297651799525]

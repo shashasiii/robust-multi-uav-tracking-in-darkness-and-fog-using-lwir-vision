@@ -1,0 +1,45 @@
+# Public release uses a deny-by-default allowlist. The research workspace is
+# intentionally broader than the GitHub repository.
+*
+
+# Root release metadata and the single public guide
+!.gitignore
+!.gitattributes
+!README.md
+!environment.yml
+!LICENSE
+
+# Detector smoke-test entry point
+!detection/
+detection/*
+!detection/test_yolo_pt.py
+
+# Frozen online Display-ID inheritance implementation and tracker config
+!tracking/
+tracking/*
+!tracking/track_folder_to_video_online_postprocess_stable_v19.py
+!tracking/botsort_uav_stable.yaml
+
+# Dual-LWIR synchronization, matching, depth, and plotting
+!stereo/
+stereo/*
+!stereo/tracking_stereo_distance_online.py
+!stereo/plot_stereo_distance_scatter.py
+!stereo/thermal_stereo_params.yaml
+
+# Independent-reference QC used by the retained unit tests
+!distance_baseline/
+distance_baseline/*
+!distance_baseline/compare_realsense_reference.py
+!distance_baseline/realsense_thermal_calibration.yaml
+
+# Deployment-oriented latency tools
+!latency/
+latency/*
+!latency/profile_yolo_forward.py
+!latency/validate_full_pipeline_latency.py
+
+# Synthetic, self-contained tests; no provider data are redistributed
+!tests/
+tests/*
+!tests/test_*.py
