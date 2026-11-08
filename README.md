@@ -148,6 +148,9 @@ validation support.
 
 ## Licence
 
-No reuse licence is granted until a root `LICENSE` file is deliberately added.
-The release should not be made public before that choice and the redistribution
-boundary have been confirmed.
+This project is released under `AGPL-3.0-only`; see `LICENSE`. This choice is
+consistent with the open-source licensing requirements of the Ultralytics YOLO
+dependency used by the pipeline. Commercial or closed-source integration may
+require a separate Ultralytics Enterprise License. The licence applies to this
+repository's source code and does not grant rights to the excluded provider
+data, third-party datasets, or model weights.
