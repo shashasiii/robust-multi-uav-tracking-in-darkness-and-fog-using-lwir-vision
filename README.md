@@ -10,10 +10,12 @@ outputs. Stereo synchronisation searches the complete causal tolerance window,
 and same-class assignment maximises feasible match cardinality before minimising
 cost.
 
-Release v3.0 adds disparity-domain EMA with causal three-sample controlled
-reacquisition and replaces the ambiguous output name `distance_m` with
-`filtered_depth_m`. The legacy metre-domain EMA remains available through the
-explicit filter mode for compatibility with historical experiments.
+Release v3.1 makes latency validation filter-mode aware and records the active
+filter configuration in schema-v2 JSON output. It retains the v3.0
+disparity-domain EMA with causal three-sample controlled reacquisition and the
+unambiguous `filtered_depth_m` output name. The legacy metre-domain EMA remains
+available through the explicit filter mode for compatibility with historical
+experiments.
 
 The public repository is deliberately smaller than the research workspace. It
 contains the stable runtime code, configurations, latency tools, and synthetic
@@ -127,11 +129,14 @@ End-to-end latency:
 python latency/validate_full_pipeline_latency.py `
   --left-dir <left-thermal-folder> `
   --right-dir <right-thermal-folder> `
-  --model <checkpoint.pt>
+  --model <checkpoint.pt> `
+  --distance-filter-mode disparity_ema_reacquire
 ```
 
 Latency results depend on hardware, software versions, warm-up policy, and
-timing scope and should not be compared without those conditions.
+timing scope and should not be compared without those conditions. Schema-v2
+JSON reports record the selected filter mode and configuration and use the
+mode-neutral `stereo_match_depth_filter` module-stage name.
 
 ## Data, weights, and evidence boundaries
 

@@ -2,6 +2,8 @@ import unittest
 
 from stereo.tracking_stereo_distance_online import (
     CSV_FIELDS,
+    LATENCY_DISTANCE_FILTER_STAGE,
+    LATENCY_SCHEMA_VERSION,
     StereoPairState,
     smooth_disparity_with_reacquire,
 )
@@ -32,6 +34,13 @@ class DisparityEmaReacquireTests(unittest.TestCase):
     def test_current_csv_schema_uses_filtered_depth_name(self):
         self.assertIn("filtered_depth_m", CSV_FIELDS)
         self.assertNotIn("distance_m", CSV_FIELDS)
+
+    def test_latency_schema_names_configured_filter_neutrally(self):
+        self.assertEqual(LATENCY_SCHEMA_VERSION, 2)
+        self.assertEqual(
+            LATENCY_DISTANCE_FILTER_STAGE,
+            "stereo_match_depth_filter",
+        )
 
     def test_normal_disparity_is_smoothed(self):
         state = self.make_state()

@@ -3,8 +3,9 @@
 The production stereo entry point performs the actual processing. Its latency
 window starts after each stereo pair has been decoded/resized and ends after
 dual-eye detection/tracking, V19 rules, stereo matching, optional temporal
-compensation, depth, and EMA. Output rendering and writes still occur to keep
-the production path unchanged, but they are outside the measured window.
+compensation, depth, and the configured temporal distance filter. Output
+rendering and writes still occur to keep the production path unchanged, but
+they are outside the measured window.
 """
 
 from __future__ import annotations
@@ -34,6 +35,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--run-name", default="rtx3070laptop_v34_core_latency")
     parser.add_argument("--max-frames", type=int, default=250)
     parser.add_argument("--warmup-frames", type=int, default=25)
+    parser.add_argument(
+        "--distance-filter-mode",
+        choices=("distance_ema", "disparity_ema_reacquire"),
+        default="distance_ema",
+        help="Temporal distance-filter implementation included in the timed core.",
+    )
     parser.add_argument(
         "--modes",
         nargs="+",
@@ -105,6 +112,8 @@ def run_mode(args: argparse.Namespace, mode: str) -> dict[str, Any]:
         "--latency-report-path",
         str(latency_json),
         "--skip-distance-plot",
+        "--distance-filter-mode",
+        args.distance_filter_mode,
     ]
     if mode == "causal":
         command.append("--enable-causal-time-compensation")
@@ -131,7 +140,8 @@ def write_summary(
         "- Nominal thermal input: `25 FPS` (`40 ms` frame-pair budget)",
         f"- Frames requested per mode: `{args.max_frames}`",
         f"- Warm-up frames excluded: `{args.warmup_frames}`",
-        "- Timing scope: dual-eye YOLO/BoT-SORT, observation extraction, V19 rules, stereo matching, optional causal compensation, depth, and EMA.",
+        f"- Distance-filter mode: `{args.distance_filter_mode}`",
+        "- Timing scope: dual-eye YOLO/BoT-SORT, observation extraction, V19 rules, stereo matching, optional causal compensation, depth, and the configured temporal distance filter.",
         "- Excluded: file discovery/synchronization, image decode/resize, initialization, drawing, CSV/image/video/report writes, and plots.",
         "",
         "## Local RTX 3070 Laptop result",

@@ -59,6 +59,8 @@ FPS = 25
 
 DEVICE = "0"
 CUDA_DEVICE_INDEX = 0
+LATENCY_SCHEMA_VERSION = 2
+LATENCY_DISTANCE_FILTER_STAGE = "stereo_match_depth_filter"
 CONF = 0.30
 IMGSZ = None
 VERBOSE = False
@@ -442,7 +444,10 @@ def parse_args():
         "--distance-ema-reset-after-invalid",
         type=int,
         default=3,
-        help="Reset/reacquire rule after this many consecutive invalid distance frames.",
+        help=(
+            "Legacy distance_ema recovery-counter threshold after consecutive "
+            "invalid rows; it does not rebuild the EMA baseline."
+        ),
     )
     parser.add_argument(
         "--distance-filter-mode",
@@ -1670,7 +1675,7 @@ def run():
         "temporal_history": [],
         "online_v19_rules": [],
         "state_lifecycle": [],
-        "stereo_match_depth_ema": [],
+        LATENCY_DISTANCE_FILTER_STAGE: [],
     }
     if latency_enabled and torch.cuda.is_available():
         torch.cuda.set_device(CUDA_DEVICE_INDEX)
@@ -1708,7 +1713,7 @@ def run():
     print(f"EMA_MAX_CHANGE  : {args.distance_ema_max_change}")
     print(f"EMA_MIN_ABS_CHG : {args.distance_ema_min_abs_change}")
     print(f"MIN_DISPARITY   : {args.distance_min_disparity}")
-    print(f"EMA_RESET_AFTER : {args.distance_ema_reset_after_invalid}")
+    print(f"LEGACY_RECOVERY_COUNTER_AFTER : {args.distance_ema_reset_after_invalid}")
     print(f"DIST_FILTER_MODE : {args.distance_filter_mode}")
     print(f"DSP_EMA_ALPHA    : {args.disparity_ema_alpha}")
     print(f"DSP_JUMP_GATE    : max({args.disparity_ema_jump_abs_px}px, {args.disparity_ema_jump_ratio:.2f}x)")
@@ -2212,7 +2217,7 @@ def run():
                     )
                     left_raw_to_pair[pair_key_left] = pair_id
                     right_raw_to_pair[pair_key_right] = pair_id
-            stage_finish("stereo_match_depth_ema", stage_started_at)
+            stage_finish(LATENCY_DISTANCE_FILTER_STAGE, stage_started_at)
 
             if latency_enabled:
                 if torch.cuda.is_available():
@@ -2512,7 +2517,7 @@ def run():
                 "share_of_core_mean": stage_mean / mean_ms if mean_ms > 0.0 else 0.0,
             }
         latency_report = {
-            "schema_version": 1,
+            "schema_version": LATENCY_SCHEMA_VERSION,
             "scope": "dual-eye core online pipeline",
             "included": [
                 "left/right YOLO26n + BoT-SORT",
@@ -2520,7 +2525,7 @@ def run():
                 "left/right V19 online causal rules",
                 "same-class Hungarian matching",
                 "optional causal time compensation",
-                "rectified disparity/depth and EMA",
+                "rectified disparity/depth and configured temporal distance filter",
             ],
             "excluded": [
                 "input file discovery and stereo filename synchronization",
@@ -2538,6 +2543,20 @@ def run():
             "first_measured_frame": int(latency_frame_indices[0]),
             "last_measured_frame": int(latency_frame_indices[-1]),
             "causal_time_compensation": bool(args.enable_causal_time_compensation),
+            "distance_filter_mode": args.distance_filter_mode,
+            "distance_filter_config": {
+                "legacy_alpha": args.distance_ema_alpha,
+                "legacy_max_change": args.distance_ema_max_change,
+                "legacy_min_abs_change_m": args.distance_ema_min_abs_change,
+                "legacy_recovery_counter_after_invalid": args.distance_ema_reset_after_invalid,
+                "disparity_ema_alpha": args.disparity_ema_alpha,
+                "disparity_jump_ratio": args.disparity_ema_jump_ratio,
+                "disparity_jump_abs_px": args.disparity_ema_jump_abs_px,
+                "disparity_reacquire_samples": args.disparity_reacquire_samples,
+                "disparity_reacquire_stability_ratio": args.disparity_reacquire_stability_ratio,
+                "disparity_reacquire_stability_abs_px": args.disparity_reacquire_stability_abs_px,
+                "disparity_reacquire_max_frame_gap": args.disparity_reacquire_max_frame_gap,
+            },
             "mean_ms": mean_ms,
             "median_ms": float(np.percentile(values, 50)),
             "p90_ms": float(np.percentile(values, 90)),
