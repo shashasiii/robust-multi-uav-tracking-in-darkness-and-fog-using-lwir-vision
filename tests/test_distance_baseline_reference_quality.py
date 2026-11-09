@@ -11,6 +11,12 @@ from distance_baseline.compare_realsense_reference import (
 
 
 class ReferenceQualityTests(unittest.TestCase):
+    def test_comparison_schema_uses_filtered_depth_names(self):
+        self.assertIn("stereo_filtered_depth_m", OUTPUT_FIELDS)
+        self.assertIn("filtered_error_m", OUTPUT_FIELDS)
+        self.assertNotIn("stereo_distance_m", OUTPUT_FIELDS)
+        self.assertNotIn("ema_error_m", OUTPUT_FIELDS)
+
     def test_multi_target_keys_and_temporal_windows_are_independent(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             path = Path(temp_dir) / "comparison.csv"

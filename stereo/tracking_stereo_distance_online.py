@@ -109,9 +109,14 @@ CSV_FIELDS = [
     "y_right",
     "disparity_px",
     "depth_m",
-    "distance_m",
+    "filtered_depth_m",
     "distance_valid",
     "filter_reason",
+    "distance_filter_mode",
+    "filtered_disparity_px",
+    "reacquire_candidate_count",
+    "reacquire_event",
+    "raw_id_changed",
     "y_diff_px",
     "center_distance_px",
     "left_conf",
@@ -256,10 +261,15 @@ class TrackedPair:
     right_center_rect: tuple[float, float]
     depth_m: float | None
     distance_valid: bool
-    distance_m: float | None
+    filtered_depth_m: float | None
     disparity_px: float | None
     ema_invalid: bool
     filter_reason: str
+    distance_filter_mode: str
+    filtered_disparity_px: float | None
+    reacquire_candidate_count: int
+    reacquire_event: bool
+    raw_id_changed: bool
     temporal: TemporalCompensationResult
 
 
@@ -274,6 +284,10 @@ class StereoPairState:
     ema_count: int = 0
     ema_streak_invalid: int = 0
     ema_recoveries: int = 0
+    disparity_ema: float | None = None
+    disparity_candidates: list[float] = field(default_factory=list)
+    disparity_candidate_last_frame: int | None = None
+    disparity_forced_reacquire: bool = False
 
 
 def parse_args():
@@ -326,7 +340,7 @@ def parse_args():
         default="",
         help=(
             "Optional JSON path for core-pipeline latency. Timing includes dual-eye "
-            "YOLO/BoT-SORT, online rules, stereo matching, compensation/depth, and EMA; "
+            "YOLO/BoT-SORT, online rules, stereo matching, compensation/depth, and distance filtering; "
             "it excludes file decoding, drawing, CSV/image/video writes, and plotting."
         ),
     )
@@ -431,6 +445,19 @@ def parse_args():
         help="Reset/reacquire rule after this many consecutive invalid distance frames.",
     )
     parser.add_argument(
+        "--distance-filter-mode",
+        choices=("distance_ema", "disparity_ema_reacquire"),
+        default="distance_ema",
+        help="Distance-domain legacy EMA or disparity-domain EMA with causal reacquisition.",
+    )
+    parser.add_argument("--disparity-ema-alpha", type=float, default=0.35)
+    parser.add_argument("--disparity-ema-jump-ratio", type=float, default=0.50)
+    parser.add_argument("--disparity-ema-jump-abs-px", type=float, default=2.0)
+    parser.add_argument("--disparity-reacquire-samples", type=int, default=3)
+    parser.add_argument("--disparity-reacquire-stability-ratio", type=float, default=0.10)
+    parser.add_argument("--disparity-reacquire-stability-abs-px", type=float, default=0.50)
+    parser.add_argument("--disparity-reacquire-max-frame-gap", type=int, default=2)
+    parser.add_argument(
         "--skip-distance-plot",
         action="store_true",
         help="Do not generate the distance scatter plot after the CSV is written.",
@@ -480,6 +507,19 @@ def validate_temporal_args(args):
         raise ValueError("--temporal-bound-margin-px must be >= 0")
     if args.latency_warmup_frames < 0:
         raise ValueError("--latency-warmup-frames must be >= 0")
+    if not 0.0 < args.disparity_ema_alpha <= 1.0:
+        raise ValueError("--disparity-ema-alpha must be in (0, 1]")
+    if min(
+        args.disparity_ema_jump_ratio,
+        args.disparity_ema_jump_abs_px,
+        args.disparity_reacquire_stability_ratio,
+        args.disparity_reacquire_stability_abs_px,
+    ) < 0.0:
+        raise ValueError("Disparity EMA thresholds must be non-negative")
+    if args.disparity_reacquire_samples < 2:
+        raise ValueError("--disparity-reacquire-samples must be >= 2")
+    if args.disparity_reacquire_max_frame_gap < 1:
+        raise ValueError("--disparity-reacquire-max-frame-gap must be >= 1")
 
 
 def sort_key(p: Path):
@@ -872,7 +912,7 @@ def estimate_depth_from_disparity(
 
 
 def smooth_distance_with_ema(
-    raw_distance_m: float | None,
+    raw_depth_m: float | None,
     pair_state: StereoPairState,
     ema_alpha: float,
     max_change_ratio: float,
@@ -880,11 +920,11 @@ def smooth_distance_with_ema(
     reset_after_invalid: int,
  ) -> tuple[float | None, bool, bool, str]:
     reset_after = max(1, reset_after_invalid)
-    if raw_distance_m is None or not math.isfinite(raw_distance_m) or raw_distance_m <= 0:
+    if raw_depth_m is None or not math.isfinite(raw_depth_m) or raw_depth_m <= 0:
         pair_state.ema_streak_invalid += 1
         return None, False, False, "ema_input_invalid"
 
-    raw = float(raw_distance_m)
+    raw = float(raw_depth_m)
     if pair_state.ema_distance is None or pair_state.ema_count <= 0:
         pair_state.ema_distance = raw
         pair_state.ema_count = 1
@@ -904,6 +944,116 @@ def smooth_distance_with_ema(
     pair_state.ema_count += 1
     pair_state.ema_streak_invalid = 0
     return ema_distance, True, False, "ok"
+
+
+def _median(values: list[float]) -> float:
+    ordered = sorted(values)
+    middle = len(ordered) // 2
+    if len(ordered) % 2:
+        return float(ordered[middle])
+    return float((ordered[middle - 1] + ordered[middle]) / 2.0)
+
+
+def _stable_disparity_candidates(
+    values: list[float], stability_ratio: float, stability_abs_px: float
+) -> bool:
+    center = _median(values)
+    limit = max(stability_abs_px, abs(center) * stability_ratio)
+    return max(abs(value - center) for value in values) <= limit
+
+
+def smooth_disparity_with_reacquire(
+    raw_depth_m: float | None,
+    raw_disparity_px: float | None,
+    pair_state: StereoPairState,
+    frame_idx: int,
+    raw_id_changed: bool,
+    *,
+    alpha: float,
+    jump_ratio: float,
+    jump_abs_px: float,
+    reacquire_samples: int,
+    stability_ratio: float,
+    stability_abs_px: float,
+    max_frame_gap: int,
+) -> tuple[float | None, bool, bool, str, float | None, int, bool]:
+    if (
+        raw_depth_m is None
+        or raw_disparity_px is None
+        or not math.isfinite(raw_depth_m)
+        or not math.isfinite(raw_disparity_px)
+        or raw_depth_m <= 0.0
+        or raw_disparity_px <= 0.0
+    ):
+        pair_state.disparity_candidates.clear()
+        pair_state.disparity_candidate_last_frame = None
+        return None, False, False, "disparity_input_invalid", None, 0, False
+
+    disparity = float(raw_disparity_px)
+    depth_scale = float(raw_depth_m) * disparity
+    if pair_state.disparity_ema is None:
+        pair_state.disparity_ema = disparity
+        return raw_depth_m, True, False, "ok", disparity, 0, False
+
+    jump_limit = max(jump_abs_px, abs(pair_state.disparity_ema) * jump_ratio)
+    within_old_level = abs(disparity - pair_state.disparity_ema) <= jump_limit
+    if raw_id_changed and not within_old_level:
+        pair_state.disparity_candidates.clear()
+        pair_state.disparity_candidate_last_frame = None
+        pair_state.disparity_forced_reacquire = True
+
+    if (
+        pair_state.disparity_candidates
+        and not pair_state.disparity_forced_reacquire
+        and within_old_level
+    ):
+        pair_state.disparity_candidates.clear()
+        pair_state.disparity_candidate_last_frame = None
+
+    if pair_state.disparity_forced_reacquire or not within_old_level:
+        if (
+            pair_state.disparity_candidate_last_frame is None
+            or frame_idx - pair_state.disparity_candidate_last_frame > max_frame_gap
+        ):
+            pair_state.disparity_candidates = [disparity]
+        else:
+            proposed = pair_state.disparity_candidates + [disparity]
+            if _stable_disparity_candidates(proposed, stability_ratio, stability_abs_px):
+                pair_state.disparity_candidates = proposed
+            else:
+                pair_state.disparity_candidates = [disparity]
+        pair_state.disparity_candidate_last_frame = frame_idx
+        candidate_count = len(pair_state.disparity_candidates)
+        if candidate_count >= reacquire_samples:
+            pair_state.disparity_ema = _median(
+                pair_state.disparity_candidates[-reacquire_samples:]
+            )
+            pair_state.disparity_candidates.clear()
+            pair_state.disparity_candidate_last_frame = None
+            pair_state.disparity_forced_reacquire = False
+            pair_state.ema_recoveries += 1
+            distance = depth_scale / pair_state.disparity_ema
+            return (
+                distance,
+                True,
+                False,
+                "disparity_ema_reacquired",
+                pair_state.disparity_ema,
+                reacquire_samples,
+                True,
+            )
+        reason = (
+            "raw_id_reacquire_pending"
+            if pair_state.disparity_forced_reacquire
+            else "disparity_jump_pending"
+        )
+        return None, False, True, reason, None, candidate_count, False
+
+    pair_state.disparity_ema = (
+        (1.0 - alpha) * pair_state.disparity_ema + alpha * disparity
+    )
+    distance = depth_scale / pair_state.disparity_ema
+    return distance, True, False, "ok", pair_state.disparity_ema, 0, False
 
 
 def candidate_is_available(decision, use_provisional: bool) -> bool:
@@ -1200,6 +1350,7 @@ def write_report(
     pair_ttl: int,
     sync_config: dict[str, Any],
     temporal_config: dict[str, Any],
+    distance_filter_config: dict[str, Any],
 ):
     total_pairs = pair_stats["total_pairs"]
     valid_pairs = pair_stats["valid_pairs"]
@@ -1227,9 +1378,24 @@ def write_report(
             f"min={np.min(arr):.3f}, p50={np.percentile(arr, 50):.3f}, "
             f"p90={np.percentile(arr, 90):.3f}, p95={np.percentile(arr, 95):.3f}, max={np.max(arr):.3f}"
         )
-    avg_distance = pair_stats["avg_distance_m"]
-    min_distance = pair_stats["min_distance_m"]
-    max_distance = pair_stats["max_distance_m"]
+    avg_filtered_depth = pair_stats["avg_filtered_depth_m"]
+    min_filtered_depth = pair_stats["min_filtered_depth_m"]
+    max_filtered_depth = pair_stats["max_filtered_depth_m"]
+    if distance_filter_config["mode"] == "disparity_ema_reacquire":
+        filter_config_lines = [
+            f"- disparity_ema_alpha: {distance_filter_config['alpha']}",
+            f"- disparity_jump_gate: max({distance_filter_config['jump_abs_px']} px, previous * {distance_filter_config['jump_ratio']})",
+            f"- disparity_reacquire_samples: {distance_filter_config['reacquire_samples']}",
+            f"- disparity_stability_gate: max({distance_filter_config['stability_abs_px']} px, median * {distance_filter_config['stability_ratio']})",
+            f"- disparity_reacquire_max_frame_gap: {distance_filter_config['max_frame_gap']}",
+        ]
+    else:
+        filter_config_lines = [
+            f"- distance_ema_alpha: {distance_filter_config['legacy_alpha']}",
+            f"- distance_ema_jump_gate: max({distance_filter_config['legacy_min_abs_change']} m, previous * {distance_filter_config['legacy_max_change']})",
+            f"- distance_ema_reset_after_invalid: {distance_filter_config['legacy_reset_after_invalid']}",
+            "- legacy_reset_semantics: recovery counter only; the metre-domain EMA baseline is not rebuilt",
+        ]
 
     lines = [
         "# Stereo Tracking Distance Report",
@@ -1241,11 +1407,11 @@ def write_report(
         f"- total_matched_pairs: {total_pairs}",
         f"- valid_distance_pairs: {valid_pairs}",
         f"- invalid_distance_pairs: {invalid_pairs}",
-        f"- ema_invalid_distance_pairs: {ema_invalid_pairs}",
-        f"- ema_recoveries: {ema_recovery_count}",
-        f"- min_distance_m: {min_distance:.3f}",
-        f"- max_distance_m: {max_distance:.3f}",
-        f"- avg_distance_m: {avg_distance:.3f}",
+        f"- distance_filter_invalid_pairs: {ema_invalid_pairs}",
+        f"- filter_recovery_or_reacquisition_events: {ema_recovery_count}",
+        f"- min_filtered_depth_m: {min_filtered_depth:.3f}",
+        f"- max_filtered_depth_m: {max_filtered_depth:.3f}",
+        f"- avg_filtered_depth_m: {avg_filtered_depth:.3f}",
         "",
         "## Matching/Distance Config",
         f"- match_y_gap_px: {match_y_gap}",
@@ -1253,6 +1419,8 @@ def write_report(
         f"- max_disparity_px: {match_max_disparity}",
         f"- min_disparity_px: {match_min_disparity}",
         f"- pair_ttl_frames: {pair_ttl}",
+        f"- distance_filter_mode: `{distance_filter_config['mode']}`",
+        *filter_config_lines,
         "",
         "## Frame Synchronization",
         f"- tolerance_ms: {sync_config['sync_tolerance_ms']}",
@@ -1285,7 +1453,7 @@ def write_report(
         f"- compensated_minus_raw_disparity_px: {distribution(temporal_disparity_changes)}",
         f"- raw_geometry_valid_rate: {(raw_geometry_valid / total_pairs * 100.0) if total_pairs else 0.0:.2f}%",
         f"- compensated_geometry_valid_rate: {(compensated_geometry_valid / temporal_attempts * 100.0) if temporal_attempts else 0.0:.2f}%",
-        f"- final_ema_pass_rate: {(valid_pairs / total_pairs * 100.0) if total_pairs else 0.0:.2f}%",
+        f"- final_distance_filter_pass_rate: {(valid_pairs / total_pairs * 100.0) if total_pairs else 0.0:.2f}%",
         "",
         "### Temporal Reason Breakdown",
     ]
@@ -1311,6 +1479,8 @@ def write_report(
         "- Left/right cameras maintain independent rule states and do not share `OnlineFrameRuleState`.",
         "- Per-frame matching groups are done by class using Hungarian assignment on formal (and optional provisional) detections.",
         "- Final stereo IDs are pair-level `D-{D/P}-{N}` tags mapped to matched pairs.",
+        "- `depth_m` is the selected raw/compensated geometric forward depth; `filtered_depth_m` is the output of the configured temporal filter.",
+        "- In `distance_ema` mode, the event counter means legacy recovery after invalid samples and is not a baseline reset. In `disparity_ema_reacquire` mode, it counts completed three-sample controlled reacquisitions.",
     ])
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
@@ -1539,6 +1709,11 @@ def run():
     print(f"EMA_MIN_ABS_CHG : {args.distance_ema_min_abs_change}")
     print(f"MIN_DISPARITY   : {args.distance_min_disparity}")
     print(f"EMA_RESET_AFTER : {args.distance_ema_reset_after_invalid}")
+    print(f"DIST_FILTER_MODE : {args.distance_filter_mode}")
+    print(f"DSP_EMA_ALPHA    : {args.disparity_ema_alpha}")
+    print(f"DSP_JUMP_GATE    : max({args.disparity_ema_jump_abs_px}px, {args.disparity_ema_jump_ratio:.2f}x)")
+    print(f"DSP_REACQUIRE    : {args.disparity_reacquire_samples} samples")
+    print(f"DSP_STABILITY    : max({args.disparity_reacquire_stability_abs_px}px, {args.disparity_reacquire_stability_ratio:.2f}x)")
     print(f"TEMPORAL_COMP    : {args.enable_causal_time_compensation}")
     print(f"TEMPORAL_HISTORY : {args.temporal_history_size}/{args.temporal_min_samples}")
     print(f"TEMPORAL_DECAY   : {args.temporal_decay}")
@@ -1565,7 +1740,7 @@ def run():
         "invalid_pairs": 0,
         "ema_invalid_pairs": 0,
         "ema_recovery_count": 0,
-        "distance_values": [],
+        "filtered_depth_values": [],
         "filter_reason_counts": {},
         "temporal_attempts": 0,
         "temporal_applied": 0,
@@ -1949,6 +2124,10 @@ def run():
                             last_seen_frame=frame_idx,
                         )
                     pair_state = stereo_pair_states[pair_id]
+                    raw_id_changed = (
+                        pair_state.left_raw_id != ld.state.track_id
+                        or pair_state.right_raw_id != rd.state.track_id
+                    )
                     if pair_state.class_id != class_id:
                         pair_state.class_id = class_id
                     pair_state.left_raw_id = ld.state.track_id
@@ -1957,19 +2136,46 @@ def run():
                     used_pair_ids.add(pair_id)
 
                     label = stereo_pair_label(class_id, pair_id)
-                    distance_m_raw = float(depth) if valid and depth is not None else None
+                    raw_depth_m = float(depth) if valid and depth is not None else None
                     prev_recoveries = pair_state.ema_recoveries
-                    distance_m, distance_valid, ema_invalid, ema_filter_reason = smooth_distance_with_ema(
-                        distance_m_raw,
-                        pair_state,
-                        args.distance_ema_alpha,
-                        args.distance_ema_max_change,
-                        args.distance_ema_min_abs_change,
-                        args.distance_ema_reset_after_invalid,
-                    )
+                    filtered_disparity_px = None
+                    reacquire_candidate_count = 0
+                    reacquire_event = False
+                    if args.distance_filter_mode == "disparity_ema_reacquire":
+                        (
+                            filtered_depth_m,
+                            distance_valid,
+                            ema_invalid,
+                            ema_filter_reason,
+                            filtered_disparity_px,
+                            reacquire_candidate_count,
+                            reacquire_event,
+                        ) = smooth_disparity_with_reacquire(
+                            raw_depth_m,
+                            disparity,
+                            pair_state,
+                            frame_idx,
+                            raw_id_changed,
+                            alpha=args.disparity_ema_alpha,
+                            jump_ratio=args.disparity_ema_jump_ratio,
+                            jump_abs_px=args.disparity_ema_jump_abs_px,
+                            reacquire_samples=args.disparity_reacquire_samples,
+                            stability_ratio=args.disparity_reacquire_stability_ratio,
+                            stability_abs_px=args.disparity_reacquire_stability_abs_px,
+                            max_frame_gap=args.disparity_reacquire_max_frame_gap,
+                        )
+                    else:
+                        filtered_depth_m, distance_valid, ema_invalid, ema_filter_reason = smooth_distance_with_ema(
+                            raw_depth_m,
+                            pair_state,
+                            args.distance_ema_alpha,
+                            args.distance_ema_max_change,
+                            args.distance_ema_min_abs_change,
+                            args.distance_ema_reset_after_invalid,
+                        )
                     if pair_state.ema_recoveries > prev_recoveries and distance_valid:
                         pair_stats["ema_recovery_count"] += 1
-                    if distance_m_raw is None:
+                    if raw_depth_m is None:
                         filter_reason = depth_filter_reason
                     elif distance_valid:
                         filter_reason = "ok"
@@ -1992,9 +2198,14 @@ def run():
                             right_center_rect=right_rect_center,
                             depth_m=depth,
                             distance_valid=distance_valid,
-                            distance_m=distance_m,
+                            filtered_depth_m=filtered_depth_m,
                             ema_invalid=ema_invalid,
                             filter_reason=filter_reason,
+                            distance_filter_mode=args.distance_filter_mode,
+                            filtered_disparity_px=filtered_disparity_px,
+                            reacquire_candidate_count=reacquire_candidate_count,
+                            reacquire_event=reacquire_event,
+                            raw_id_changed=raw_id_changed,
                             disparity_px=disparity,
                             temporal=temporal,
                         )
@@ -2022,13 +2233,13 @@ def run():
                     left_canvas,
                     match.left_decision,
                     color,
-                    f"{match.label} " + (f"{match.distance_m:.2f}m" if match.distance_valid and match.distance_m is not None else "invalid"),
+                    f"{match.label} " + (f"{match.filtered_depth_m:.2f}m" if match.distance_valid and match.filtered_depth_m is not None else "invalid"),
                 )
                 draw_bbox(
                     right_canvas,
                     match.right_decision,
                     color,
-                    f"{match.label} " + (f"{match.distance_m:.2f}m" if match.distance_valid and match.distance_m is not None else "invalid"),
+                    f"{match.label} " + (f"{match.filtered_depth_m:.2f}m" if match.distance_valid and match.filtered_depth_m is not None else "invalid"),
                 )
 
                 lx1, ly1, lx2, ly2 = [int(round(v)) for v in match.left_decision.raw_box]
@@ -2073,7 +2284,7 @@ def run():
                 pair_stats["total_pairs"] += 1
                 if match.distance_valid:
                     pair_stats["valid_pairs"] += 1
-                    pair_stats["distance_values"].append(float(match.distance_m or 0.0))
+                    pair_stats["filtered_depth_values"].append(float(match.filtered_depth_m or 0.0))
                 else:
                     pair_stats["invalid_pairs"] += 1
                     if match.ema_invalid:
@@ -2129,9 +2340,14 @@ def run():
                     "y_right": f"{match.right_decision.raw_box[1]:.3f}",
                     "disparity_px": "" if match.disparity_px is None else f"{match.disparity_px:.3f}",
                     "depth_m": "" if match.depth_m is None else f"{match.depth_m:.4f}",
-                    "distance_m": "" if match.distance_m is None else f"{match.distance_m:.4f}",
+                    "filtered_depth_m": "" if match.filtered_depth_m is None else f"{match.filtered_depth_m:.4f}",
                     "distance_valid": int(bool(match.distance_valid)),
                     "filter_reason": match.filter_reason,
+                    "distance_filter_mode": match.distance_filter_mode,
+                    "filtered_disparity_px": "" if match.filtered_disparity_px is None else f"{match.filtered_disparity_px:.6f}",
+                    "reacquire_candidate_count": match.reacquire_candidate_count,
+                    "reacquire_event": int(match.reacquire_event),
+                    "raw_id_changed": int(match.raw_id_changed),
                     "y_diff_px": f"{abs(match.left_center_rect[1] - match.right_center_rect[1]):.3f}",
                     "center_distance_px": f"{math.hypot(match.left_center_rect[0] - match.right_center_rect[0], match.left_center_rect[1] - match.right_center_rect[1]):.3f}",
                     "left_conf": f"{float(match.left_decision.confidence):.3f}",
@@ -2195,14 +2411,14 @@ def run():
         if writer is not None:
             writer.release()
 
-    avg_distance = float("nan")
-    min_distance = float("nan")
-    max_distance = float("nan")
-    if pair_stats["distance_values"]:
-        distances = np.array(pair_stats["distance_values"], dtype=float)
-        avg_distance = float(np.mean(distances))
-        min_distance = float(np.min(distances))
-        max_distance = float(np.max(distances))
+    avg_filtered_depth = float("nan")
+    min_filtered_depth = float("nan")
+    max_filtered_depth = float("nan")
+    if pair_stats["filtered_depth_values"]:
+        filtered_depths = np.array(pair_stats["filtered_depth_values"], dtype=float)
+        avg_filtered_depth = float(np.mean(filtered_depths))
+        min_filtered_depth = float(np.min(filtered_depths))
+        max_filtered_depth = float(np.max(filtered_depths))
     final_stats = {
         "total_pairs": pair_stats["total_pairs"],
         "valid_pairs": pair_stats["valid_pairs"],
@@ -2221,9 +2437,9 @@ def run():
         "temporal_comp_disparities": pair_stats["temporal_comp_disparities"],
         "raw_geometry_valid": pair_stats["raw_geometry_valid"],
         "compensated_geometry_valid": pair_stats["compensated_geometry_valid"],
-        "avg_distance_m": avg_distance,
-        "min_distance_m": min_distance,
-        "max_distance_m": max_distance,
+        "avg_filtered_depth_m": avg_filtered_depth,
+        "min_filtered_depth_m": min_filtered_depth,
+        "max_filtered_depth_m": max_filtered_depth,
     }
     write_report(
         output_report_path,
@@ -2246,6 +2462,20 @@ def run():
             "max_gap_ms": args.temporal_max_gap_ms,
             "max_shift_px": args.temporal_max_shift_px,
             "bound_margin_px": args.temporal_bound_margin_px,
+        },
+        {
+            "mode": args.distance_filter_mode,
+            "legacy_alpha": args.distance_ema_alpha,
+            "legacy_max_change": args.distance_ema_max_change,
+            "legacy_min_abs_change": args.distance_ema_min_abs_change,
+            "legacy_reset_after_invalid": args.distance_ema_reset_after_invalid,
+            "alpha": args.disparity_ema_alpha,
+            "jump_ratio": args.disparity_ema_jump_ratio,
+            "jump_abs_px": args.disparity_ema_jump_abs_px,
+            "reacquire_samples": args.disparity_reacquire_samples,
+            "stability_ratio": args.disparity_reacquire_stability_ratio,
+            "stability_abs_px": args.disparity_reacquire_stability_abs_px,
+            "max_frame_gap": args.disparity_reacquire_max_frame_gap,
         },
     )
 
@@ -2359,7 +2589,7 @@ def run():
     print(f"Matched pairs   : {pair_stats['total_pairs']}")
     print(f"Valid distances : {pair_stats['valid_pairs']}")
     print(f"Invalid dist    : {pair_stats['invalid_pairs']}")
-    print(f"EMA filtered    : {pair_stats['ema_invalid_pairs']}")
+    print(f"Filter invalid  : {pair_stats['ema_invalid_pairs']}")
     print("=" * 70)
 
 

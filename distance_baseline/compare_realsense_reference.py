@@ -71,15 +71,20 @@ OUTPUT_FIELDS = [
     "reference_reason",
     "stereo_disparity_px",
     "stereo_depth_m",
-    "stereo_distance_m",
+    "stereo_filtered_depth_m",
     "stereo_distance_valid",
     "stereo_filter_reason",
+    "stereo_distance_filter_mode",
+    "stereo_filtered_disparity_px",
+    "stereo_reacquire_candidate_count",
+    "stereo_reacquire_event",
+    "stereo_raw_id_changed",
     "raw_error_m",
     "raw_abs_error_m",
     "raw_relative_error_pct",
-    "ema_error_m",
-    "ema_abs_error_m",
-    "ema_relative_error_pct",
+    "filtered_error_m",
+    "filtered_abs_error_m",
+    "filtered_relative_error_pct",
     "left_timestamp_ns",
     "right_timestamp_ns",
     "stereo_delta_ns",
@@ -244,6 +249,11 @@ def parse_float(value: object) -> float | None:
     except (TypeError, ValueError):
         return None
     return number if math.isfinite(number) else None
+
+
+def filtered_depth_text(row: dict[str, str]) -> str:
+    """Read the current field, with `distance_m` only as a historical CSV fallback."""
+    return row.get("filtered_depth_m", "") or row.get("distance_m", "")
 
 
 def format_number(value: float | None, digits: int = 6) -> str:
@@ -711,9 +721,14 @@ def main() -> int:
                     "timestamp_delta_ms": format_number(delta_ms, 3),
                     "stereo_disparity_px": row["disparity_px"],
                     "stereo_depth_m": row["depth_m"],
-                    "stereo_distance_m": row["distance_m"],
+                    "stereo_filtered_depth_m": filtered_depth_text(row),
                     "stereo_distance_valid": row["distance_valid"],
                     "stereo_filter_reason": row["filter_reason"],
+                    "stereo_distance_filter_mode": row.get("distance_filter_mode", "distance_ema"),
+                    "stereo_filtered_disparity_px": row.get("filtered_disparity_px", ""),
+                    "stereo_reacquire_candidate_count": row.get("reacquire_candidate_count", ""),
+                    "stereo_reacquire_event": row.get("reacquire_event", ""),
+                    "stereo_raw_id_changed": row.get("raw_id_changed", ""),
                 }
             )
             for field in TEMPORAL_PASSTHROUGH_FIELDS:
@@ -728,9 +743,9 @@ def main() -> int:
                     else None
                 )
                 raw_error = error_fields(parse_float(row.get("depth_m")), reference)
-                ema_error = error_fields(parse_float(row.get("distance_m")), reference)
+                filtered_error = error_fields(parse_float(filtered_depth_text(row)), reference)
                 output["raw_error_m"], output["raw_abs_error_m"], output["raw_relative_error_pct"] = raw_error
-                output["ema_error_m"], output["ema_abs_error_m"], output["ema_relative_error_pct"] = ema_error
+                output["filtered_error_m"], output["filtered_abs_error_m"], output["filtered_relative_error_pct"] = filtered_error
                 writer.writerow(output)
                 if index % 100 == 0 or index == len(stereo_rows):
                     print(f"Wrote comparisons: {index}/{len(stereo_rows)}", flush=True)
@@ -889,9 +904,9 @@ def main() -> int:
             output["reference_valid"] = "1" if reason == "ok" else "0"
             output["reference_reason"] = reason
             raw_error = error_fields(parse_float(row.get("depth_m")), reference)
-            ema_error = error_fields(parse_float(row.get("distance_m")), reference)
+            filtered_error = error_fields(parse_float(filtered_depth_text(row)), reference)
             output["raw_error_m"], output["raw_abs_error_m"], output["raw_relative_error_pct"] = raw_error
-            output["ema_error_m"], output["ema_abs_error_m"], output["ema_relative_error_pct"] = ema_error
+            output["filtered_error_m"], output["filtered_abs_error_m"], output["filtered_relative_error_pct"] = filtered_error
             writer.writerow(output)
             if index % 100 == 0 or index == len(stereo_rows):
                 print(f"Wrote comparisons: {index}/{len(stereo_rows)}", flush=True)

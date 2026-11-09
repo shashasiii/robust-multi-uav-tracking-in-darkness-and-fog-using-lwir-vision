@@ -10,6 +10,11 @@ outputs. Stereo synchronisation searches the complete causal tolerance window,
 and same-class assignment maximises feasible match cardinality before minimising
 cost.
 
+Release v3.0 adds disparity-domain EMA with causal three-sample controlled
+reacquisition and replaces the ambiguous output name `distance_m` with
+`filtered_depth_m`. The legacy metre-domain EMA remains available through the
+explicit filter mode for compatibility with historical experiments.
+
 The public repository is deliberately smaller than the research workspace. It
 contains the stable runtime code, configurations, latency tools, and synthetic
 unit tests. It does **not** contain the original RGB-D-T recordings, Roboflow
@@ -30,7 +35,7 @@ snapshots, or internal project-management documents.
   alignment and quality-control functions.
 - `latency/`: detector and end-to-end latency measurement tools.
 - `tests/`: synthetic timestamp, lexicographic-assignment, compensation, and
-  reference-QC tests.
+  reference-QC tests, including disparity-EMA reacquisition state transitions.
 
 ## Environment
 
@@ -90,12 +95,16 @@ python stereo/tracking_stereo_distance_online.py `
   --right-dir <right-thermal-folder> `
   --model <checkpoint.pt> `
   --params-path stereo/thermal_stereo_params.yaml `
-  --enable-causal-time-compensation
+  --enable-causal-time-compensation `
+  --distance-filter-mode disparity_ema_reacquire
 ```
 
 Outputs default to `outputs/stereo/`. The command emits annotated frames, a
 video, a tracking/depth CSV, a compact run report, and—unless disabled—a depth
-plot. Calibration values are rig-specific and must not be reused blindly.
+plot. The CSV keeps raw geometric `depth_m` separate from temporally filtered
+`filtered_depth_m`; it also records the filter mode, filtered disparity,
+candidate count, Raw-ID-change flag, and completed-reacquisition flag.
+Calibration values are rig-specific and must not be reused blindly.
 
 ## Detector and latency checks
 

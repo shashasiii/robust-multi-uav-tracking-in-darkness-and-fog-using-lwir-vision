@@ -69,7 +69,10 @@ def load_class_distance_data(csv_path: Path) -> dict[int, list[tuple[int, float]
                     continue
                 if row.get("distance_valid", "").strip() not in {"1", "true", "True"}:
                     continue
-                distance_raw = row.get("distance_m", "").strip()
+                # `distance_m` is accepted only as a historical-input fallback.
+                distance_raw = (
+                    row.get("filtered_depth_m", "") or row.get("distance_m", "")
+                ).strip()
                 if not distance_raw:
                     continue
                 distance = float(distance_raw)
