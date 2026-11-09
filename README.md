@@ -5,7 +5,10 @@ project of the same name. It provides an online-causal dual-LWIR pipeline for
 YOLO26n detection, independent BoT-SORT tracking, precision-first Display-ID
 inheritance, timestamp-aware stereo synchronization, same-class Hungarian
 assignment, rectification, forward-depth estimation, optional causal
-exposure-midpoint compensation, and auditable machine-readable outputs.
+recorded-timestamp-midpoint compensation, and auditable machine-readable
+outputs. Stereo synchronisation searches the complete causal tolerance window,
+and same-class assignment maximises feasible match cardinality before minimising
+cost.
 
 The public repository is deliberately smaller than the research workspace. It
 contains the stable runtime code, configurations, latency tools, and synthetic
@@ -26,7 +29,8 @@ snapshots, or internal project-management documents.
 - `distance_baseline/compare_realsense_reference.py`: independent-reference
   alignment and quality-control functions.
 - `latency/`: detector and end-to-end latency measurement tools.
-- `tests/`: synthetic timestamp, compensation, and reference-QC tests.
+- `tests/`: synthetic timestamp, lexicographic-assignment, compensation, and
+  reference-QC tests.
 
 ## Environment
 

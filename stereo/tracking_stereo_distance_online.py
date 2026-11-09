@@ -190,7 +190,7 @@ class StereoFramePair:
 
     @property
     def stereo_delta_ns(self) -> int:
-        """Signed exposure offset: right timestamp minus left timestamp."""
+        """Signed recorded-frame offset: right host timestamp minus left."""
         return self.right_timestamp_ns - self.left_timestamp_ns
 
     @property
@@ -372,7 +372,10 @@ def parse_args():
     parser.add_argument(
         "--enable-causal-time-compensation",
         action="store_true",
-        help="Predict both rectified centers to their exposure midpoint before disparity estimation.",
+        help=(
+            "Predict both rectified centers to the midpoint of their recorded host-side "
+            "frame timestamps before disparity estimation."
+        ),
     )
     parser.add_argument("--temporal-history-size", type=int, default=5)
     parser.add_argument("--temporal-min-history-samples", "--temporal-min-samples", dest="temporal_min_samples", type=int, default=2)
@@ -572,7 +575,8 @@ def collect_stereo_pairs(
 
     for _, left_path, left_ts in left_with_ts:
         left_ns = _to_ns(left_ts)
-        pos = int(np.searchsorted(right_ns, left_ns))
+        window_start = int(np.searchsorted(right_ns, left_ns - tol_ns, side="left"))
+        window_end = int(np.searchsorted(right_ns, left_ns + tol_ns, side="right"))
         best_idx = -1
         best_diff = None
         time_candidates = 0
@@ -580,8 +584,8 @@ def collect_stereo_pairs(
         if phase_tol_ns > 0 and len(phase_history_ns) >= sync_phase_min_samples:
             phase_center_ns = int(np.median(np.asarray(phase_history_ns, dtype=np.int64)))
 
-        for cand in (pos - 1, pos):
-            if not (0 <= cand < len(right_ns)) or right_used[cand]:
+        for cand in range(window_start, window_end):
+            if right_used[cand]:
                 continue
             signed_diff = int(right_ns[cand] - left_ns)
             diff = abs(signed_diff)
@@ -929,6 +933,28 @@ def box_area(decision) -> float:
     return max(0.0, x2 - x1) * max(0.0, y2 - y1)
 
 
+def solve_lexicographic_assignment(
+    feasible_cost: np.ndarray,
+    cost_limit: float,
+) -> list[tuple[int, int, float]]:
+    """Maximise feasible cardinality, then minimise its non-negative cost."""
+    if feasible_cost.ndim != 2 or 0 in feasible_cost.shape:
+        return []
+
+    cardinality_bound = min(feasible_cost.shape)
+    infeasible_cost = (cardinality_bound + 1) * max(0.0, cost_limit) + 1.0
+    assignment_cost = np.where(
+        np.isfinite(feasible_cost), feasible_cost, infeasible_cost
+    )
+    rows, cols = linear_sum_assignment(assignment_cost)
+    pairs: list[tuple[int, int, float]] = []
+    for row, col in zip(rows, cols):
+        value = float(feasible_cost[row, col])
+        if math.isfinite(value):
+            pairs.append((int(row), int(col), value))
+    return pairs
+
+
 def match_frame_candidates(
     left_candidates: list[Any],
     right_candidates: list[Any],
@@ -940,7 +966,7 @@ def match_frame_candidates(
 
     n_left = len(left_candidates)
     n_right = len(right_candidates)
-    cost = np.full((n_left, n_right), cost_limit + 1000.0, dtype=np.float64)
+    feasible_cost = np.full((n_left, n_right), np.inf, dtype=np.float64)
 
     for i, left in enumerate(left_candidates):
         lx, ly = decision_center(left)
@@ -956,15 +982,9 @@ def match_frame_candidates(
             area_cost = MATCH_AREA_RATIO_WEIGHT * abs(math.log(area_ratio))
             total = center_dist + area_cost
             if total <= cost_limit:
-                cost[i, j] = total
+                feasible_cost[i, j] = total
 
-    rows, cols = linear_sum_assignment(cost)
-    pairs: list[tuple[int, int, float]] = []
-    for r, c in zip(rows, cols):
-        cst = float(cost[r, c])
-        if cst <= cost_limit:
-            pairs.append((int(r), int(c), cst))
-    return pairs
+    return solve_lexicographic_assignment(feasible_cost, cost_limit)
 
 
 def rectified_from_decision(
