@@ -24,12 +24,11 @@ The production script still creates normal artifacts outside the timed window so
 The JSON and Markdown summary record `distance_filter_mode` and break the core window into left/right preprocessing, YOLO forward, YOLO postprocess, BoT-SORT update, tracking-call overhead, observation extraction, temporal history, V19 rules, state lifecycle, and `stereo_match_depth_filter`. BoT-SORT is further split into sparse-optical-flow GMC and association/state management. CUDA is synchronized at each GPU boundary for attribution, so the breakdown can have small synchronization overhead relative to the single end-to-end core timer.
 
 ```powershell
-Set-Location D:\PycharmProjects\CEG_Project_2026
-D:\Python\dl_proj_env\python.exe latency\validate_full_pipeline_latency.py `
-  --left-dir E:\path\to\v34\left_thermal `
-  --right-dir E:\path\to\v34\right_thermal `
-  --model weights\v8_yolo26n_e300_b128\weights\best.pt `
-  --run-name v7_candidate_dispema `
+python latency\validate_full_pipeline_latency.py `
+  --left-dir <left-thermal-folder> `
+  --right-dir <right-thermal-folder> `
+  --model <checkpoint.pt> `
+  --run-name <unique-run-name> `
   --distance-filter-mode disparity_ema_reacquire
 ```
 
